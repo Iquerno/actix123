@@ -1,0 +1,15 @@
+[package]
+name = "rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile-release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[dependencies]
+actix-web = { version = "4.2.1", features = ["rustls"] }
+# actix-tls = "3.0.3"
+rustls = "0.20.7"

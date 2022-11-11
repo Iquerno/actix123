@@ -1,0 +1,102 @@
+use axum::{ *, extract::*, routing::*, http::*, body::*, handler::*, response::* };
+use axum_extra::{ routing::* };
+use axum_server::{ *, tls_rustls::* };
+use tower::{ * };
+use tower_http::{ *, trace::*, services::* };
+use tracing::*;
+use serde::*; use serde_json::*; use serde_derive::*;
+use std::{ time::*, net::*, io::*, path::PathBuf, sync::atomic::*, sync::Arc };
+
+struct State {
+    api_requests: AtomicUsize,
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();    // Initialize logging
+    tokio::join!(           // Serve all web servers
+        serve_tls( frontend(), 443 ),
+        serve( frontend(), 80 ),
+    );
+}
+
+/// 40% ROOT-LEVEL FRONTEND server: public API with authentication and TLS
+fn frontend() -> Router {
+    debug!("#> Starting <frontend> service");
+    let api_route = Router::new().route( "/", get(serial123) );
+    let err_route = Router::new().route( "/", get(err123) );
+    Router::new()
+        /*.route( "/", any(|Host(hostname): Host, request: Request<Body>| async move {
+            match hostname.as_str() {
+                "api.euroban.org" => api_route.oneshot(request).await,
+                _ => err_route.oneshot(request).await,
+            }
+        }))*/
+        .nest( "/", api_route )
+        .nest( "/err", err_route )
+        .layer( ServiceBuilder::new()
+            .layer( TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    tracing::debug_span!( "HTTP" )
+                })
+                .on_request(|request: &Request<Body>, _span: &Span| {
+                    tracing::info!( "request: {} {}", request.method(), request.uri().path() )
+                })
+        ))
+}
+
+/// 80% Test server, used as a benchmark. Responds with short test JSON msg
+fn bare() -> Router {
+    Router::new()
+        .route( "/", get(serial123) )
+}
+#[derive( Serialize, Deserialize, Debug )]
+struct JsonTypes123 {
+    relevance: String,
+    url: String
+}
+async fn err123() -> String {
+    "ERR123".to_string()
+}
+async fn serial123() -> Json<Vec<JsonTypes123>> {
+    let json123 = vec![
+        JsonTypes123 { relevance: "0.9".to_string(), url: "a123".to_string() },
+        JsonTypes123 { relevance: "0.8".to_string(), url: "b123".to_string() }
+    ];
+    Json( json123 )
+}
+// HIGH LEVEL HANDLERS
+/// 20% HIGH-LEVEL ERROR handler: universal error handling based on error code table
+async fn error(_err: std::io::Error) -> impl IntoResponse {
+    (StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong...")
+}
+/// 100% HIGH-LEVEL SOCKET handler: serve <Router> on specified socket (0.0.0.0:[port])
+async fn serve(app: Router, port: u16) {
+    let addr = SocketAddr::from( ([0,0,0,0], port) );
+    debug!("#> Service listening on {}", addr);
+    axum::Server::bind(&addr)
+        .serve( app.layer(TraceLayer::new_for_http()).into_make_service() )
+        .await.unwrap();
+}
+/// 50% HIGH-LEVEL TLS SOCKET handler: serve <Router> on specified socket (0.0.0.0:[port])
+async fn serve_tls(app: Router, port: u16) {
+    let tls_conf = RustlsConfig::from_pem_file(
+        PathBuf::from("/etc/letsencrypt/live/euroban.org/fullchain.pem"),
+        PathBuf::from("/etc/letsencrypt/live/euroban.org/privkey.pem")
+    ).await.unwrap();
+    let addr = SocketAddr::from( ([0,0,0,0], port) );
+    debug!("#> Service listening on {}", addr);
+    axum_server::bind_rustls(addr, tls_conf)
+        .serve( app.layer(TraceLayer::new_for_http()).into_make_service() )
+        .await.unwrap();
+}
+/// 0% HIGH-LEVEL FILE OUTPUT handler: output STR (compatible with Router) from various sources
+async fn auto_file() -> &'static str {
+    raw_file()
+}
+
+// LOW LEVEL HANDLERS
+/// 5% LOW-LEVEL FILE handler: output STR (compatible with Router) from file paths
+fn raw_file() -> &'static str {
+    "hello from static str"
+}
